@@ -1,0 +1,128 @@
+import datetime
+import json
+
+import requests
+from bs4 import BeautifulSoup
+from requests.utils import requote_uri
+from waste_collection_schedule import Collection  # type: ignore[attr-defined]
+
+TITLE = "Willoughby City Council (NSW)"
+DESCRIPTION = "Source for Willoughby City Council rubbish collection."
+URL = "https://www.willoughby.nsw.gov.au/"
+TEST_CASES = {
+    "Willoughby Hotel": {
+        "post_code": "2068",
+        "suburb": "North Willoughby",
+        "street_name": "Penshurst St",
+        "street_number": "315",
+    },
+    "Westfield Chatswood": {
+        "post_code": "2067",
+        "suburb": "Chatswood",
+        "street_name": "Anderson St",
+        "street_number": "1",
+    },
+    "Willoughby Leisure Centre": {
+        "post_code": "2068",
+        "suburb": "Willoughby",
+        "street_name": "Small St",
+        "street_number": "2",
+    },
+    "Supercheap Auto Chatswood": {
+        "post_code": "2067",
+        "suburb": "Chatswood",
+        "street_name": "Eastern Valley Way",
+        "street_number": "Unit 1A/372",
+    },
+}
+
+API_URLS = {
+    "address_search": "https://www.willoughby.nsw.gov.au/api/v1/myarea/search?keywords={}",
+    "collection": "https://www.willoughby.nsw.gov.au/ocapi/Public/myarea/wasteservices?geolocationid={}&ocsvclang=en-AU",
+}
+
+HEADERS = {"user-agent": "Mozilla/5.0"}
+
+ICON_MAP = {
+    "General Waste": "trash-can",
+    "Recycling": "mdi:recycle",
+}
+
+
+class Source:
+    def __init__(
+        self, post_code: str, suburb: str, street_name: str, street_number: str
+    ):
+        self.post_code = post_code
+        self.suburb = suburb
+        self.street_name = street_name
+        self.street_number = street_number
+
+    def fetch(self):
+        locationId = 0
+
+        address = "{} {} {} NSW {}".format(
+            self.street_number, self.street_name, self.suburb, self.post_code
+        )
+
+        q = requote_uri(str(API_URLS["address_search"]).format(address))
+
+        # Retrieve suburbs
+        r = requests.get(q, headers=HEADERS)
+
+        data = json.loads(r.text)
+
+        # Find the ID for our suburb
+        for item in data["Items"]:
+            locationId = item["Id"]
+            break
+
+        if locationId == 0:
+            raise ValueError(
+                f"Unable to find location ID for {address}, maybe you misspelled your address?"
+            )
+
+        # Retrieve the upcoming collections for our property
+        q = requote_uri(str(API_URLS["collection"]).format(locationId))
+
+        r = requests.get(q, headers=HEADERS)
+
+        data = json.loads(r.text)
+
+        responseContent = data["responseContent"]
+
+        soup = BeautifulSoup(responseContent, "html.parser")
+        services = soup.find_all("div", attrs={"class": "waste-services-result"})
+
+        entries = []
+
+        for item in services:
+            # test if <div> contains a valid date. If not, is is not a collection item.
+            date_text = item.find("div", attrs={"class": "next-service"})
+
+            # The date format currently used on https://www.willoughby.nsw.gov.au/Residents/Waste-and-recycling/Household-bin-services/Waste-and-street-sweeping-services
+            date_format = "%a %d/%m/%Y"
+
+            try:
+                # Strip carriage returns and newlines out of the HTML content
+                cleaned_date_text = (
+                    date_text.text.replace("\r", "").replace("\n", "").strip()
+                )
+
+                # Parse the date
+                date = datetime.datetime.strptime(cleaned_date_text, date_format).date()
+
+            except ValueError:
+                continue
+
+            waste_type = item.find("h3").text.strip()
+
+            entries.append(
+                Collection(
+                    date=date,
+                    t=waste_type,
+                    icon=ICON_MAP.get(waste_type, "mdi:trash-can"),
+                )
+            )
+
+        return entries
